@@ -3,7 +3,7 @@
 
 #define MAX_INPUT_LEN 1024
 #define MAX_ARGS 100
-#define MAX_ENV_VARS 50
+#define MAX_ENV_VARS 100
 
 extern char *env_vars_name[MAX_ENV_VARS];
 extern char *env_var_value[MAX_ENV_VARS];

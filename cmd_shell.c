@@ -8,6 +8,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "path.h"
+
 char *env_vars_name[MAX_ENV_VARS];
 char *env_var_value[MAX_ENV_VARS];
 int env_count = 0;
@@ -52,27 +54,32 @@ void unset_env_values(const char *var_name) {
 
 // Scan the command for a $<something> and replace it if found
 void replace_env_vars(char *cmd) {
+    char buffer[MAX_INPUT_LEN] = {0};
     char *ptr = cmd;
-    while ((ptr = strchr(ptr, '$')) != NULL) {
-        char *var_end = strchr(ptr + 1, ' ');
-        if (!var_end)
-            var_end = ptr + strlen(ptr);
+    char *dest_ptr = buffer;
 
-        char var_name[var_end - ptr - 1];
-        strncpy(var_name, ptr + 1, var_end - ptr - 1);
-        var_name[var_end - ptr - 1] = '\0';
+    while (*ptr) {
+        if (*ptr == '$') {
+            ptr++;
+            char var_name[MAX_INPUT_LEN] = {0};
+            int counter = 0;
 
-        char *var_value = get_env_value(var_name);
-        if (var_value) {
-            char buffer[MAX_INPUT_LEN];
-            strncpy(buffer, cmd, ptr - cmd);
-            buffer[ptr - cmd] = '\0';
-            strcat(buffer, var_value);
-            strcat(buffer, var_end);
-            strcpy(cmd, buffer);
+            while (*ptr && ((*ptr >= 'A' && *ptr <= 'Z') || (*ptr >= 'a' && *ptr <= 'z') ||
+                            (*ptr == '_'))) {
+                var_name[counter++] = *ptr++;
+            }
+            var_name[counter] = '\0';
+
+            char *var_value = get_env_value(var_name);
+            if (var_value)
+                while (*var_value) *dest_ptr++ = *var_value++;
+        } else {
+            *dest_ptr++ = *ptr++;
         }
-        ptr = var_end;
     }
+
+    *dest_ptr = '\0';
+    strcpy(cmd, buffer);
 }
 
 // Implemented "|" to separate commands and pipe output from one to the input of another
@@ -80,14 +87,11 @@ void piping(char *cmd) {
     char *commands[MAX_ARGS];
     int num_of_cmd = 0;
 
-    char *cmd_token = strtok(cmd, "|");
-    while (cmd_token != NULL) {
-        commands[num_of_cmd++] = cmd_token;
-        cmd_token = strtok(NULL, "|");
-    }
+    split(cmd, commands, '|');
+
+    while (commands[num_of_cmd] != NULL) num_of_cmd++;
 
     int pipe_fd[2 * (num_of_cmd - 1)];
-    pid_t pid;
 
     for (int ix = 0; ix < num_of_cmd - 1; ix++) {
         if (pipe(pipe_fd + 2 * ix) == -1) {
@@ -97,7 +101,7 @@ void piping(char *cmd) {
     }
 
     for (int ix = 0; ix < num_of_cmd; ix++) {
-        pid = fork();
+        pid_t pid = fork();
         if (pid == 0) {
             if (ix > 0)
                 dup2(pipe_fd[2 * (ix - 1)], STDIN_FILENO);
@@ -107,23 +111,13 @@ void piping(char *cmd) {
             for (int jx = 0; jx < 2 * (num_of_cmd - 1); jx++) close(pipe_fd[jx]);
 
             char *args[MAX_ARGS];
-            int jx = 0;
-            char *cmd_args = commands[ix];
-            cmd_token = strtok(cmd_args, " \t");
-            while (cmd_token) {
-                args[jx++] = cmd_token;
-                cmd_token = strtok(NULL, " \t");
-            }
-            args[jx] = NULL;
-
+            split(commands[ix], args, ' ');
             execvp(args[0], args);
             perror("failed to execute");
             exit(1);
         }
     }
-
     for (int ix = 0; ix < 2 * (num_of_cmd - 1); ix++) close(pipe_fd[ix]);
-
     for (int ix = 0; ix < num_of_cmd; ix++) wait(NULL);
 }
 
@@ -136,24 +130,22 @@ void commands(char *cmd) {
     int redir_input = 0;
     int redir_output = 0;
 
-    char *cmd_token = strtok(cmd, " \t");
-    int ix = 0;
+    split(cmd, args, ' ');
 
-    while (cmd_token != NULL) {
-        if (strcmp(cmd_token, "&") == 0) {
+    for (int ix = 0; args[ix] != NULL; ix++) {
+        if (strcmp(args[ix], "&") == 0) {
             background = 1;
-        } else if (strcmp(cmd_token, "<") == 0) {
+            args[ix] = NULL;
+        } else if (strcmp(args[ix], "<") == 0) {
             redir_input = 1;
-            file_input = strtok(NULL, " \t");
-        } else if (strcmp(cmd_token, ">") == 0) {
+            file_input = args[++ix];
+            args[ix - 1] = NULL;
+        } else if (strcmp(args[ix], ">") == 0) {
             redir_output = 1;
-            file_output = strtok(NULL, " \t");
-        } else {
-            args[ix++] = cmd_token;
+            file_output = args[++ix];
+            args[ix - 1] = NULL;
         }
-        cmd_token = strtok(NULL, " \t");
     }
-    args[ix] = NULL;
 
     // Implemented "cd" and "pwd" (directly). cd must take a full or relative path
     // includes set, unset, echo
@@ -161,20 +153,24 @@ void commands(char *cmd) {
         if (chdir(args[1]) != 0)
             perror("cd error");
         return;
-    } else if (strcmp(args[0], "pwd") == 0) {
+    }
+    if (strcmp(args[0], "pwd") == 0) {
         char cwd[MAX_INPUT_LEN];
         if (getcwd(cwd, sizeof(cwd)) != NULL)
             printf("%s\n", cwd);
         else
             perror("pwd error");
         return;
-    } else if (strcmp(args[0], "set") == 0) {
+    }
+    if (strcmp(args[0], "set") == 0) {
         set_env_value(args[1], args[2]);
         return;
-    } else if (strcmp(args[0], "unset") == 0) {
+    }
+    if (strcmp(args[0], "unset") == 0) {
         unset_env_values(args[1]);
         return;
-    } else if (strcmp(args[0], "echo") == 0) {
+    }
+    if (strcmp(args[0], "echo") == 0) {
         for (int jx = 1; args[jx] != NULL; jx++) {
             replace_env_vars(args[jx]);
             printf("%s ", args[jx]);
@@ -182,6 +178,10 @@ void commands(char *cmd) {
         printf("\n");
         return;
     }
+
+    char absolute_path[MAX_INPUT_LEN];
+    if (find_absolute_path(args[0], absolute_path))
+        args[0] = absolute_path;
 
     // read the PATH environment variable and execute command if found
     pid_t pid = fork();
@@ -208,10 +208,11 @@ void commands(char *cmd) {
             close(output_fd);
         }
 
-        if (execvp(args[0], args) == -1) {  // execute the command
-            perror("command not found");
-            exit(1);
-        }
+        // execute the command
+        execvp(args[0], args) == -1;
+        perror("command not found");
+        exit(1);
+
     } else {
         if (background)
             printf("running in background: process %d\n", pid);
